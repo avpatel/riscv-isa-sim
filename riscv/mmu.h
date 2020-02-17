@@ -92,16 +92,15 @@ public:
     inline type##_t load_##type(reg_t addr) { \
       if (unlikely(addr & (sizeof(type##_t)-1))) \
         return misaligned_load(addr, sizeof(type##_t)); \
-      reg_t vpn = addr >> PGSHIFT; \
+      int idx = lookup_tlb(addr, false, &tlb_load_tag[0]); \
       size_t size = sizeof(type##_t); \
-      if (likely(tlb_load_tag[vpn % TLB_ENTRIES] == vpn)) { \
-        stats_tlb_load_hit++; \
+      if (likely(idx >= 0)) { \
         if (proc) READ_MEM(addr, size); \
-        return from_le(*(type##_t*)(tlb_data[vpn % TLB_ENTRIES].host_offset + addr)); \
+        return from_le(*(type##_t*)(tlb_data[idx].host_offset + addr)); \
       } \
-      if (unlikely(tlb_load_tag[vpn % TLB_ENTRIES] == (vpn | TLB_CHECK_TRIGGERS))) { \
-        stats_tlb_load_hit++; \
-        type##_t data = from_le(*(type##_t*)(tlb_data[vpn % TLB_ENTRIES].host_offset + addr)); \
+      idx = lookup_tlb(addr, true, &tlb_load_tag[0]); \
+      if (unlikely(idx >= 0)) { \
+        type##_t data = from_le(*(type##_t*)(tlb_data[idx].host_offset + addr)); \
         if (!matched_trigger) { \
           matched_trigger = trigger_exception(OPERATION_LOAD, addr, data); \
           if (matched_trigger) \
@@ -111,7 +110,6 @@ public:
         return data; \
       } \
       type##_t res; \
-      stats_tlb_load_miss++; \
       load_slow_path(addr, sizeof(type##_t), (uint8_t*)&res); \
       if (proc) READ_MEM(addr, size); \
       return from_le(res); \
@@ -141,27 +139,24 @@ public:
     void store_##type(reg_t addr, type##_t val) { \
       if (unlikely(addr & (sizeof(type##_t)-1))) \
         return misaligned_store(addr, val, sizeof(type##_t)); \
-      reg_t vpn = addr >> PGSHIFT; \
+      int idx = lookup_tlb(addr, false, &tlb_store_tag[0]); \
       size_t size = sizeof(type##_t); \
-      if (likely(tlb_store_tag[vpn % TLB_ENTRIES] == vpn)) { \
-        stats_tlb_store_hit++; \
+      if (likely(idx >= 0)) { \
         if (proc) WRITE_MEM(addr, val, size); \
-        *(type##_t*)(tlb_data[vpn % TLB_ENTRIES].host_offset + addr) = to_le(val); \
+        *(type##_t*)(tlb_data[idx].host_offset + addr) = to_le(val); \
       } \
-      else if (unlikely(tlb_store_tag[vpn % TLB_ENTRIES] == (vpn | TLB_CHECK_TRIGGERS))) { \
-        stats_tlb_store_hit++; \
+      else if (unlikely((idx = lookup_tlb(addr, true, &tlb_store_tag[0])) >= 0)) { \
         if (!matched_trigger) { \
           matched_trigger = trigger_exception(OPERATION_STORE, addr, val); \
           if (matched_trigger) \
             throw *matched_trigger; \
         } \
         if (proc) WRITE_MEM(addr, val, size); \
-        *(type##_t*)(tlb_data[vpn % TLB_ENTRIES].host_offset + addr) = to_le(val); \
+        *(type##_t*)(tlb_data[idx].host_offset + addr) = to_le(val); \
       } \
       else { \
 	type##_t le_val = to_le(val); \
         if (proc) WRITE_MEM(addr, val, size); \
-        stats_tlb_store_miss++; \
         store_slow_path(addr, sizeof(type##_t), (const uint8_t*)&le_val); \
       } \
   }
@@ -361,6 +356,7 @@ private:
   uint64_t stats_tlb_store_miss;
 
   // finish translation on a TLB miss and update the TLB
+  int lookup_tlb(reg_t vaddr, bool check_trig, reg_t *tlb_tag);
   tlb_entry_t refill_tlb(reg_t vaddr, reg_t paddr, char* host_addr, access_type type);
   const char* fill_from_mmio(reg_t vaddr, reg_t paddr);
 
@@ -375,25 +371,21 @@ private:
 
   // ITLB lookup
   inline tlb_entry_t translate_insn_addr(reg_t addr) {
-    reg_t vpn = addr >> PGSHIFT;
-    if (likely(tlb_insn_tag[vpn % TLB_ENTRIES] == vpn)) {
-      stats_tlb_fetch_hit++;
-      return tlb_data[vpn % TLB_ENTRIES];
+    int idx = lookup_tlb(addr, false, &tlb_insn_tag[0]);
+    if (likely(idx >= 0)) {
+      return tlb_data[idx];
     }
     tlb_entry_t result;
-    if (unlikely(tlb_insn_tag[vpn % TLB_ENTRIES] != (vpn | TLB_CHECK_TRIGGERS))) {
-      stats_tlb_fetch_miss++;
+    idx = lookup_tlb(addr, true, &tlb_insn_tag[0]);
+    if (unlikely(idx < 0)) {
       result = fetch_slow_path(addr);
     } else {
-      stats_tlb_fetch_hit++;
-      result = tlb_data[vpn % TLB_ENTRIES];
-    }
-    if (unlikely(tlb_insn_tag[vpn % TLB_ENTRIES] == (vpn | TLB_CHECK_TRIGGERS))) {
-      uint16_t* ptr = (uint16_t*)(tlb_data[vpn % TLB_ENTRIES].host_offset + addr);
+      uint16_t* ptr = (uint16_t*)(tlb_data[idx].host_offset + addr);
       int match = proc->trigger_match(OPERATION_EXECUTE, addr, from_le(*ptr));
       if (match >= 0) {
         throw trigger_matched_t(match, OPERATION_EXECUTE, addr, from_le(*ptr));
       }
+      result = tlb_data[idx];
     }
     return result;
   }

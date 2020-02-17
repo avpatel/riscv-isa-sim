@@ -67,6 +67,8 @@ tlb_entry_t mmu_t::fetch_slow_path(reg_t vaddr)
 {
   reg_t paddr = translate(vaddr, sizeof(fetch_temp), FETCH);
 
+  stats_tlb_fetch_miss++;
+
   if (auto host_addr = sim->addr_to_mem(paddr)) {
     return refill_tlb(vaddr, paddr, host_addr, FETCH);
   } else {
@@ -107,6 +109,8 @@ void mmu_t::load_slow_path(reg_t addr, reg_t len, uint8_t* bytes)
 {
   reg_t paddr = translate(addr, len, LOAD);
 
+  stats_tlb_load_miss++;
+
   if (auto host_addr = sim->addr_to_mem(paddr)) {
     memcpy(bytes, host_addr, len);
     if (tracer.interested_in_range(paddr, paddr + PGSIZE, LOAD))
@@ -129,6 +133,8 @@ void mmu_t::store_slow_path(reg_t addr, reg_t len, const uint8_t* bytes)
 {
   reg_t paddr = translate(addr, len, STORE);
 
+  stats_tlb_store_miss++;
+
   if (!matched_trigger) {
     reg_t data = reg_from_bytes(len, bytes);
     matched_trigger = trigger_exception(OPERATION_STORE, addr, data);
@@ -145,6 +151,26 @@ void mmu_t::store_slow_path(reg_t addr, reg_t len, const uint8_t* bytes)
   } else if (!sim->mmio_store(paddr, len, bytes)) {
     throw trap_store_access_fault(addr);
   }
+}
+
+int mmu_t::lookup_tlb(reg_t vaddr, bool check_trig, reg_t *tlb_tag)
+{
+  reg_t vpn = (vaddr >> PGSHIFT);
+  int idx = vpn % TLB_ENTRIES;
+  if (unlikely(check_trig)) {
+    if (tlb_tag[idx] != (vpn | TLB_CHECK_TRIGGERS))
+      return -1;
+  } else {
+    if (tlb_tag[idx] != vpn)
+      return -1;
+  }
+  if (tlb_tag == &tlb_insn_tag[0])
+    stats_tlb_fetch_hit++;
+  else if (tlb_tag == &tlb_load_tag[0])
+    stats_tlb_load_hit++;
+  else if (tlb_tag == &tlb_store_tag[0])
+    stats_tlb_store_hit++;
+  return idx;
 }
 
 tlb_entry_t mmu_t::refill_tlb(reg_t vaddr, reg_t paddr, char* host_addr, access_type type)
